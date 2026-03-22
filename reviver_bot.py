@@ -1,7 +1,7 @@
 """
-🌱 Reviver Bot — Intelligent Dead Channel Reviver
+Knockdown Shield — Intelligent Dead Channel Reviver
 Analyzes channel history, learns what works, and uses Claude AI to craft
-contextual revival messages that feel natural and get responses.
+contextual revival messages to wake up niggas. Built for Dama. 
 
 Commands:
   !revive set <hours>       - Set silence threshold for current channel
