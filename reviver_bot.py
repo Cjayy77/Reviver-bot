@@ -277,9 +277,9 @@ Rules:
 @commands.has_permissions(manage_channels=True)
 async def revive(ctx):
     embed = discord.Embed(
-        title="🌱 Reviver Bot",
-        description="Keeps your server alive with AI-powered conversation starters.",
-        color=0x57F287,
+        title="Knockdown Shield",
+        description="Keeps your server alive with AI-powered conversation starters. Shi basically wakes up niggas",
+        color=0xF0A500,
     )
     cmds = [
         ("`!revive set <hours>`",       "Watch this channel, revive after N hours of silence"),
