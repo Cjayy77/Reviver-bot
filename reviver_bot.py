@@ -198,7 +198,7 @@ async def _get_history(channel: discord.TextChannel, limit: int = 60) -> list:
 async def _call_claude(system: str, user: str) -> str:
     response = await asyncio.to_thread(
         ai.chat.completions.create,
-        model="llama3-8b-8192",
+        model="llama-3.1-8b-instant",
         max_tokens=300,
         messages=[
             {"role": "system", "content": system},
