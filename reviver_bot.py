@@ -22,7 +22,7 @@ Commands:
 
 import discord
 from discord.ext import commands, tasks
-import anthropic
+from groq import Groq
 import os
 import asyncio
 import re
@@ -37,7 +37,7 @@ intents.message_content = True
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
-ai  = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+ai  = Groq(api_key=os.environ["GROQ_API_KEY"])
 
 # ── State ──────────────────────────────────────────────────────────────────────
 guild_config: dict[int, dict] = {}
@@ -197,13 +197,15 @@ async def _get_history(channel: discord.TextChannel, limit: int = 60) -> list:
 
 async def _call_claude(system: str, user: str) -> str:
     response = await asyncio.to_thread(
-        ai.messages.create,
-        model="claude-haiku-4-5-20251001",
+        ai.chat.completions.create,
+        model="llama3-8b-8192",
         max_tokens=300,
-        system=system,
-        messages=[{"role": "user", "content": user}],
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user",   "content": user},
+        ],
     )
-    return response.content[0].text.strip()
+    return response.choices[0].message.content.strip()
 
 
 # ── Techniques ─────────────────────────────────────────────────────────────────
@@ -608,6 +610,6 @@ if __name__ == "__main__":
     token = os.environ.get("DISCORD_TOKEN")
     if not token:
         raise ValueError("Set the DISCORD_TOKEN environment variable.")
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise ValueError("Set the ANTHROPIC_API_KEY environment variable.")
+    if not os.environ.get("GROQ_API_KEY"):
+        raise ValueError("Set the GROQ_API_KEY environment variable.")
     bot.run(token)
