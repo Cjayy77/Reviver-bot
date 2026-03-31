@@ -206,7 +206,17 @@ def _log_revival(channel_id: int, technique: str, content: str):
     })
 
 
-async def _get_history(channel: discord.TextChannel, limit: int = 60) -> list:
+def _resolve_mentions(text: str, channel: discord.TextChannel) -> str:
+    """Replace any plain name mentions in text with proper Discord mentions."""
+    for member in channel.guild.members:
+        for name in [member.display_name, member.name]:
+            if not name or len(name) < 3:
+                continue
+            # Match the name as a whole word, case-insensitive
+            pattern = re.compile(rf'\b{re.escape(name)}\b', re.IGNORECASE)
+            if pattern.search(text):
+                text = pattern.sub(member.mention, text, count=1)
+    return text
     messages = []
     async for msg in channel.history(limit=limit):
         if not msg.author.bot:
@@ -309,6 +319,7 @@ async def _revive_now(channel: discord.TextChannel, guild_id: int, ch_cfg: dict)
     )
 
     revival_msg = result.splitlines()[0].strip()
+    revival_msg = _resolve_mentions(revival_msg, channel)
     await channel.send(revival_msg)
     _log_revival(channel.id, "now", revival_msg)
 
@@ -367,7 +378,8 @@ async def _revive_debate(channel: discord.TextChannel, guild_id: int, ch_cfg: di
             + (f"Trending: {trends}" if trends else "")
         )
     )
-    await channel.send(f"🔥 {result.strip()}")
+    msg = _resolve_mentions(result.strip(), channel)
+    await channel.send(f"🔥 {msg}")
     _log_revival(channel.id, "debate", result.strip())
 
 
@@ -426,8 +438,9 @@ async def _revive_memory(channel: discord.TextChannel, guild_id: int, ch_cfg: di
         ),
         user=f"{picked.author.display_name} said: {picked.content[:200]}"
     )
+    reaction = _resolve_mentions(result.strip(), channel)
     preview = picked.content[:60] + ('...' if len(picked.content) > 60 else '')
-    await channel.send(f"wait {picked.author.mention} said \"{preview}\" — {result.strip()}")
+    await channel.send(f"wait {picked.author.mention} said \"{preview}\" — {reaction}")
     _log_revival(channel.id, "memory", result.strip())
 
 
@@ -456,7 +469,8 @@ async def _revive_question(channel: discord.TextChannel, guild_id: int, ch_cfg: 
         ),
         user=f"They said: \"{picked_msg.content[:200]}\""
     )
-    await channel.send(f"{target.mention} {result.strip()}")
+    question = _resolve_mentions(result.strip(), channel)
+    await channel.send(f"{target.mention} {question}")
     _log_revival(channel.id, "question", result.strip())
 
 
