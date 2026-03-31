@@ -299,9 +299,18 @@ async def _revive_now(channel: discord.TextChannel, guild_id: int, ch_cfg: dict)
                 topic_users[word].add(msg.author.id)
 
     top_topics = sorted(topic_users, key=lambda w: len(topic_users[w]), reverse=True)[:6]
+
+    # Build member name→mention map for AI to use
+    member_map: dict[str, discord.Member] = {}
+    for msg in messages[-20:]:
+        m = channel.guild.get_member(msg.author.id)
+        if m:
+            member_map[m.display_name] = m
+
     history_text = "\n".join(f"{m.author.display_name}: {m.content[:120]}" for m in messages[-35:])
     trends = await _get_trends()
     mood = _get_mood_prompt(ch_cfg)
+    names_available = ", ".join(member_map.keys()) if member_map else "no specific members"
 
     result = await _call_ai(
         system=(
@@ -310,18 +319,22 @@ async def _revive_now(channel: discord.TextChannel, guild_id: int, ch_cfg: dict)
             f"Write ONE message that restarts things. Be specific to what they actually talked about.\n\n"
             f"You can: reference something funny or dumb someone said, connect their chat to a current trend, "
             f"roast a take, ask something that'll divide people, or drop a random observation that fits.\n\n"
+            f"If you want to address someone directly, use @TheirName format. "
+            f"Members you can address: {names_available}\n\n"
             f"Rules: under 180 chars, no greetings, never mention silence, sound like a real person texting. "
             f"0-1 emoji. Output ONLY the message."
         ),
         user=(
             f"Chat history:\n{history_text}\n\n"
-            f"Hot topics in chat: {', '.join(top_topics) or 'general'}\n"
-            + (f"Currently trending online: {trends}\n" if trends else "")
+            f"Hot topics: {', '.join(top_topics) or 'general'}\n"
+            + (f"Trending online: {trends}\n" if trends else "")
         )
     )
 
     revival_msg = result.splitlines()[0].strip()
-    revival_msg = _resolve_mentions(revival_msg, channel)
+    # Convert @Name references to proper Discord mentions
+    for name, member in member_map.items():
+        revival_msg = re.sub(rf'@{re.escape(name)}\b', member.mention, revival_msg, flags=re.IGNORECASE)
     await channel.send(revival_msg)
     _log_revival(channel.id, "now", revival_msg)
 
@@ -368,11 +381,19 @@ async def _revive_debate(channel: discord.TextChannel, guild_id: int, ch_cfg: di
     trends = await _get_trends()
     mood = _get_mood_prompt(ch_cfg)
 
+    member_map: dict[str, discord.Member] = {}
+    for msg in messages[-15:]:
+        m = channel.guild.get_member(msg.author.id)
+        if m:
+            member_map[m.display_name] = m
+    names_available = ", ".join(member_map.keys()) if member_map else "no specific members"
+
     result = await _call_ai(
         system=(
             f"{mood}\n\n"
-            "Drop a hot take in a Discord server. Make it bold — something people will actually push back on. "
+            "Drop a hot take in a Discord server. Make it bold — something people will push back on. "
             "Tie it to what they talked about or something trending. "
+            f"If it makes sense to call someone out, use @TheirName. Members: {names_available}\n"
             "Sound like a real person, not a prompt. Under 140 chars. Output ONLY the take."
         ),
         user=(
@@ -380,9 +401,11 @@ async def _revive_debate(channel: discord.TextChannel, guild_id: int, ch_cfg: di
             + (f"Trending: {trends}" if trends else "")
         )
     )
-    msg = _resolve_mentions(result.strip(), channel)
+    msg = result.strip()
+    for name, member in member_map.items():
+        msg = re.sub(rf'@{re.escape(name)}\b', member.mention, msg, flags=re.IGNORECASE)
     await channel.send(f"🔥 {msg}")
-    _log_revival(channel.id, "debate", result.strip())
+    _log_revival(channel.id, "debate", msg)
 
 
 async def _revive_versus(channel: discord.TextChannel, guild_id: int, ch_cfg: dict):
