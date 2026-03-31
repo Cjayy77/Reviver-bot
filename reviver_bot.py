@@ -1,18 +1,18 @@
 """
 🎯 Knockdown Shield — Intelligent Channel Reviver
 Apex Legends themed, but revival content stays general.
-Revives dead channels using multiple techniques powered by Claude AI.
 
 Commands:
-  !revive now        - AI-crafted message based on channel history
+  !revive now        - AI message based on channel history
   !revive poll       - Drop a conversation poll
   !revive debate     - Spark a hot take debate
   !revive versus     - Pit two things against each other
   !revive memory     - Resurface a past message
-  !revive question   - Ask a random active member something
+  !revive question   - Ask someone about what they said
   !revive challenge  - Post a fun daily challenge
   !revive set <hrs>  - Watch this channel, revive after N hours
-  !revive auto       - Toggle smart auto-revival (picks best technique)
+  !revive auto       - Toggle smart auto-revival
+  !revive mood <mood>- Set channel mood: witty / chaotic / sharp
   !revive quiet <s> <e> - Set quiet hours
   !revive timezone <tz> - Set server timezone
   !revive personality <txt> - Set channel personality
@@ -45,7 +45,27 @@ revival_history: dict[int, list] = defaultdict(list)
 last_message: dict[int, datetime] = {}
 pending_revival: set[int] = set()
 last_revival: dict[int, datetime] = {}
-REVIVAL_COOLDOWN_HOURS = 1
+REVIVAL_COOLDOWN_HOURS = 2
+
+# Trends cache — refreshed every 30 min, shared across all channels
+_trends_cache: dict = {"topics": [], "fetched_at": None}
+TRENDS_TTL_MINUTES = 30
+
+# Mood definitions per channel
+MOODS = {
+    "witty": (
+        "You are witty and sarcastic. You find the joke in everything, roast bad takes lightly, "
+        "and deliver punchlines naturally. Think sharp Twitter energy."
+    ),
+    "chaotic": (
+        "You are chaotic and unfiltered. You say what no one else will, make bold claims, "
+        "stir the pot, and keep people on their toes. Unpredictable but never mean."
+    ),
+    "sharp": (
+        "You are sharp and observational. You notice things others miss, call out contradictions, "
+        "and ask the questions that make people stop and think."
+    ),
+}
 
 # ── Apex flavor ────────────────────────────────────────────────────────────────
 APEX_INTROS = [
@@ -195,7 +215,41 @@ async def _get_history(channel: discord.TextChannel, limit: int = 60) -> list:
     return messages
 
 
-async def _call_claude(system: str, user: str) -> str:
+async def _get_trends() -> str:
+    """Fetch trending topics, cached for 30 minutes."""
+    now = datetime.now(timezone.utc)
+    if (
+        _trends_cache["fetched_at"] and
+        (now - _trends_cache["fetched_at"]).total_seconds() < TRENDS_TTL_MINUTES * 60 and
+        _trends_cache["topics"]
+    ):
+        return _trends_cache["topics"]
+
+    try:
+        response = await asyncio.to_thread(
+            ai.chat.completions.create,
+            model="llama-3.1-8b-instant",
+            max_tokens=150,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "List 6 things currently trending or being talked about on social media right now — "
+                    "could be memes, news, pop culture, drama, anything viral. "
+                    "Be specific and current. Output as a simple comma-separated list, nothing else."
+                )
+            }],
+            tools=[{"type": "web_search"}],
+        )
+        topics = response.choices[0].message.content.strip()
+        _trends_cache["topics"] = topics
+        _trends_cache["fetched_at"] = now
+        return topics
+    except Exception as e:
+        print(f"[_get_trends] failed: {e}")
+        return ""
+
+
+async def _call_ai(system: str, user: str) -> str:
     response = await asyncio.to_thread(
         ai.chat.completions.create,
         model="llama-3.1-8b-instant",
@@ -208,57 +262,75 @@ async def _call_claude(system: str, user: str) -> str:
     return response.choices[0].message.content.strip()
 
 
+def _get_mood_prompt(ch_cfg: dict) -> str:
+    mood = ch_cfg.get("mood", "witty")
+    return MOODS.get(mood, MOODS["witty"])
+
+
 # ── Techniques ─────────────────────────────────────────────────────────────────
 async def _revive_now(channel: discord.TextChannel, guild_id: int, ch_cfg: dict):
-    messages = await _get_history(channel)
+    messages = await _get_history(channel, 60)
     if not messages:
-        await channel.send("⚠️ *No message history found — send some messages first!*")
+        await channel.send("⚠️ *No message history — send some messages first!*")
         return
+
     stop_words = {"the","a","an","is","it","in","on","at","to","for","of","and","or",
                   "but","i","you","we","they","he","she","my","your","this","that",
                   "was","are","be","have","has","do","did","not","with","just","so",
                   "what","how","like","go","get","ok","okay","yeah","yes","no","lol","im"}
-    word_freq: Counter = Counter()
-    user_activity: Counter = Counter()
+
+    # Build topic → users map
+    topic_users: dict[str, set[int]] = defaultdict(set)
     for msg in messages:
-        user_activity[msg.author.id] += 1
         for word in re.findall(r"\b[a-z]{4,}\b", msg.content.lower()):
             if word not in stop_words:
-                word_freq[word] += 1
-    top_topics = [w for w, _ in word_freq.most_common(8)]
-    top_user_ids = [uid for uid, _ in user_activity.most_common(3)]
-    top_members = [channel.guild.get_member(uid) for uid in top_user_ids if channel.guild.get_member(uid)]
-    history_text = "\n".join(f"{m.author.display_name}: {m.content[:120]}" for m in messages[-25:])
-    personality = ch_cfg.get("personality", "casual, warm, direct")
-    result = await _call_claude(
+                topic_users[word].add(msg.author.id)
+
+    top_topics = sorted(topic_users, key=lambda w: len(topic_users[w]), reverse=True)[:6]
+    history_text = "\n".join(f"{m.author.display_name}: {m.content[:120]}" for m in messages[-35:])
+    trends = await _get_trends()
+    mood = _get_mood_prompt(ch_cfg)
+
+    result = await _call_ai(
         system=(
-            f"You are a Discord community member. Craft ONE short revival message to restart conversation.\n"
-            f"Channel personality: {personality}\n"
-            f"Rules: sound human, reference real past topics naturally, under 180 chars, "
-            f"end with a question, no 'Hey everyone' openers, never mention silence or quiet, 1 emoji max.\n"
-            f"Output: first line = message, second line = one word topic"
+            f"{mood}\n\n"
+            f"You're a member of a Discord server jumping back into a dead conversation. "
+            f"Write ONE message that restarts things. Be specific to what they actually talked about.\n\n"
+            f"You can: reference something funny or dumb someone said, connect their chat to a current trend, "
+            f"roast a take, ask something that'll divide people, or drop a random observation that fits.\n\n"
+            f"Rules: under 180 chars, no greetings, never mention silence, sound like a real person texting. "
+            f"0-1 emoji. Output ONLY the message."
         ),
-        user=f"History:\n{history_text}\n\nTop topics: {', '.join(top_topics[:5]) or 'general'}"
+        user=(
+            f"Chat history:\n{history_text}\n\n"
+            f"Hot topics in chat: {', '.join(top_topics) or 'general'}\n"
+            + (f"Currently trending online: {trends}\n" if trends else "")
+        )
     )
-    lines = result.splitlines()
-    revival_msg = lines[0].strip()
-    topic = lines[1].strip() if len(lines) > 1 else (top_topics[0] if top_topics else "general")
-    pings = " ".join(m.mention for m in top_members[:2]) if top_members else ""
-    final = f"{pings} {revival_msg}".strip() if pings else revival_msg
-    await channel.send(final)
+
+    revival_msg = result.splitlines()[0].strip()
+    await channel.send(revival_msg)
     _log_revival(channel.id, "now", revival_msg)
 
 
 async def _revive_poll(channel: discord.TextChannel, guild_id: int, ch_cfg: dict):
     messages = await _get_history(channel, 40)
-    history_text = "\n".join(f"{m.author.display_name}: {m.content[:80]}" for m in messages[-15:]) or "general chat"
-    result = await _call_claude(
+    history_text = "\n".join(f"{m.author.display_name}: {m.content[:80]}" for m in messages[-15:]) or "general"
+    trends = await _get_trends()
+    mood = _get_mood_prompt(ch_cfg)
+
+    result = await _call_ai(
         system=(
-            "Generate a fun engaging poll for a Discord community based on their recent chat. "
-            "Keep it general and relatable. Output ONLY:\n"
-            "QUESTION: <question>\nA: <option>\nB: <option>\nC: <option>\nD: <option>"
+            f"{mood}\n\n"
+            "Write a poll that will actually divide people. "
+            "Base it on what they talked about or connect it to something trending. "
+            "Make the options genuinely hard to choose between — no obvious right answer. "
+            "Output ONLY:\nQUESTION: <question>\nA: <option>\nB: <option>\nC: <option>\nD: <option>"
         ),
-        user=f"Recent chat:\n{history_text}"
+        user=(
+            f"Chat:\n{history_text}\n"
+            + (f"Trending: {trends}" if trends else "")
+        )
     )
     lines = [l.strip() for l in result.splitlines() if l.strip()]
     question = next((l.replace("QUESTION:", "").strip() for l in lines if l.startswith("QUESTION:")), "What's your take?")
@@ -267,7 +339,7 @@ async def _revive_poll(channel: discord.TextChannel, guild_id: int, ch_cfg: dict
     emojis = ["🇦", "🇧", "🇨", "🇩"]
     for i, opt in enumerate(options[:4]):
         embed.add_field(name=emojis[i], value=opt[2:].strip(), inline=False)
-    embed.set_footer(text=f"{apex_intro()} React to vote! • Knockdown Shield")
+    embed.set_footer(text="React to vote!")
     msg = await channel.send(embed=embed)
     for i in range(len(options[:4])):
         try:
@@ -279,45 +351,53 @@ async def _revive_poll(channel: discord.TextChannel, guild_id: int, ch_cfg: dict
 
 async def _revive_debate(channel: discord.TextChannel, guild_id: int, ch_cfg: dict):
     messages = await _get_history(channel, 40)
-    history_text = "\n".join(f"{m.author.display_name}: {m.content[:80]}" for m in messages[-15:]) or "general chat"
-    result = await _call_claude(
+    history_text = "\n".join(f"{m.author.display_name}: {m.content[:80]}" for m in messages[-15:]) or "general"
+    trends = await _get_trends()
+    mood = _get_mood_prompt(ch_cfg)
+
+    result = await _call_ai(
         system=(
-            "Generate ONE spicy but friendly hot take for a Discord community. "
-            "Opinionated enough to spark debate but not offensive. "
-            "Base it loosely on chat history. Output ONLY the statement, under 120 chars."
+            f"{mood}\n\n"
+            "Drop a hot take in a Discord server. Make it bold — something people will actually push back on. "
+            "Tie it to what they talked about or something trending. "
+            "Sound like a real person, not a prompt. Under 140 chars. Output ONLY the take."
         ),
-        user=f"Recent chat:\n{history_text}"
+        user=(
+            f"Chat:\n{history_text}\n"
+            + (f"Trending: {trends}" if trends else "")
+        )
     )
-    embed = discord.Embed(title="🔥 Hot Take", description=f"*{result.strip()}*", color=0xFF6B00)
-    embed.set_footer(text=f"{apex_intro()} Agree or disagree? • Knockdown Shield")
-    msg = await channel.send(embed=embed)
-    try:
-        await msg.add_reaction("✅")
-        await msg.add_reaction("❌")
-    except Exception:
-        pass
+    await channel.send(f"🔥 {result.strip()}")
     _log_revival(channel.id, "debate", result.strip())
 
 
 async def _revive_versus(channel: discord.TextChannel, guild_id: int, ch_cfg: dict):
     messages = await _get_history(channel, 40)
-    history_text = "\n".join(f"{m.author.display_name}: {m.content[:80]}" for m in messages[-15:]) or "general chat"
-    result = await _call_claude(
+    history_text = "\n".join(f"{m.author.display_name}: {m.content[:80]}" for m in messages[-15:]) or "general"
+    trends = await _get_trends()
+    mood = _get_mood_prompt(ch_cfg)
+
+    result = await _call_ai(
         system=(
-            "Generate a fun 'This vs That' matchup for a Discord community. "
-            "Broadly relatable, loosely inspired by chat. Output ONLY:\n"
-            "OPTION_A: <thing>\nOPTION_B: <thing>\nCONTEXT: <why this matters, max 80 chars>"
+            f"{mood}\n\n"
+            "Create a 'this vs that' that's actually hard to pick. "
+            "Relevant to their chat or a current trend. No obvious winner. "
+            "Output ONLY:\nOPTION_A: <thing>\nOPTION_B: <thing>\nCONTEXT: <one punchy line>"
         ),
-        user=f"Recent chat:\n{history_text}"
+        user=(
+            f"Chat:\n{history_text}\n"
+            + (f"Trending: {trends}" if trends else "")
+        )
     )
     lines = [l.strip() for l in result.splitlines() if l.strip()]
     option_a = next((l.replace("OPTION_A:", "").strip() for l in lines if l.startswith("OPTION_A:")), "Option A")
     option_b = next((l.replace("OPTION_B:", "").strip() for l in lines if l.startswith("OPTION_B:")), "Option B")
-    context  = next((l.replace("CONTEXT:", "").strip() for l in lines if l.startswith("CONTEXT:")), "Which side are you on?")
-    embed = discord.Embed(title="⚔️ Versus", description=f"*{context}*", color=0x9B59B6)
-    embed.add_field(name="🅰️", value=f"**{option_a}**", inline=True)
-    embed.add_field(name="🅱️", value=f"**{option_b}**", inline=True)
-    embed.set_footer(text=f"{apex_intro()} React to pick your side! • Knockdown Shield")
+    context  = next((l.replace("CONTEXT:", "").strip() for l in lines if l.startswith("CONTEXT:")), "Pick a side.")
+    embed = discord.Embed(
+        description=f"**{option_a}** vs **{option_b}**\n*{context}*",
+        color=0x9B59B6
+    )
+    embed.set_footer(text="🅰️ or 🅱️ — no fence sitting")
     msg = await channel.send(embed=embed)
     try:
         await msg.add_reaction("🅰️")
@@ -329,69 +409,83 @@ async def _revive_versus(channel: discord.TextChannel, guild_id: int, ch_cfg: di
 
 async def _revive_memory(channel: discord.TextChannel, guild_id: int, ch_cfg: dict):
     messages = await _get_history(channel, 80)
-    if len(messages) < 5:
+    old_msgs = [m for m in messages[:len(messages)//2] if len(m.content) > 20]
+    if not old_msgs:
         await _revive_now(channel, guild_id, ch_cfg)
         return
-    picked = random.choice(messages[:len(messages)//2])
-    result = await _call_claude(
+    picked = random.choice(old_msgs)
+    mood = _get_mood_prompt(ch_cfg)
+
+    result = await _call_ai(
         system=(
-            "Someone said something interesting in a Discord chat a while back. "
-            "Write a short casual follow-up that resurfaces it and invites others in. "
-            "Sound natural. Under 140 chars. End with a question."
+            f"{mood}\n\n"
+            "Someone said something in a Discord chat earlier. React to it — "
+            "could be agreement, disagreement, roasting it, building on it, or calling it out. "
+            "Sound like a real person who just remembered this. Under 100 chars. No quotes. "
+            "Output ONLY your reaction, nothing else."
         ),
-        user=f"{picked.author.display_name} once said: \"{picked.content[:200]}\""
+        user=f"{picked.author.display_name} said: {picked.content[:200]}"
     )
-    embed = discord.Embed(description=f"*{result.strip()}*", color=0x3498DB)
-    embed.set_footer(text=f"{apex_intro()} Throwback • Knockdown Shield")
-    await channel.send(embed=embed)
+    preview = picked.content[:60] + ('...' if len(picked.content) > 60 else '')
+    await channel.send(f"wait {picked.author.mention} said \"{preview}\" — {result.strip()}")
     _log_revival(channel.id, "memory", result.strip())
 
 
 async def _revive_question(channel: discord.TextChannel, guild_id: int, ch_cfg: dict):
     messages = await _get_history(channel, 40)
-    if not messages:
+    # Only tag someone who said something specific and substantial
+    substantial = [m for m in messages[-15:] if len(m.content) > 20 and not m.content.startswith("!")]
+    if not substantial:
         await _revive_now(channel, guild_id, ch_cfg)
         return
-    seen_ids = []
-    for msg in reversed(messages):
-        if msg.author.id not in seen_ids:
-            seen_ids.append(msg.author.id)
-        if len(seen_ids) >= 5:
-            break
-    target = channel.guild.get_member(random.choice(seen_ids))
+
+    picked_msg = random.choice(substantial)
+    target = channel.guild.get_member(picked_msg.author.id)
     if not target:
         await _revive_now(channel, guild_id, ch_cfg)
         return
-    history_text = "\n".join(f"{m.author.display_name}: {m.content[:80]}" for m in messages[-15:])
-    result = await _call_claude(
+
+    mood = _get_mood_prompt(ch_cfg)
+    result = await _call_ai(
         system=(
-            "Generate a fun friendly question for a Discord member based on recent chat. "
-            "Light and engaging, not invasive. Under 120 chars. "
-            "Do NOT include their name — just the question."
+            f"{mood}\n\n"
+            "Someone said something in a Discord server. "
+            "Ask them a follow-up — could be genuine curiosity, playfully challenging them, "
+            "or calling out something questionable they said. Under 90 chars. "
+            "Do NOT include their name. Output ONLY the question or comment."
         ),
-        user=f"Target: {target.display_name}\nChat:\n{history_text}"
+        user=f"They said: \"{picked_msg.content[:200]}\""
     )
-    await channel.send(f"🎯 {target.mention} {result.strip()}")
+    await channel.send(f"{target.mention} {result.strip()}")
     _log_revival(channel.id, "question", result.strip())
 
 
 async def _revive_challenge(channel: discord.TextChannel, guild_id: int, ch_cfg: dict):
     messages = await _get_history(channel, 40)
-    history_text = "\n".join(f"{m.author.display_name}: {m.content[:80]}" for m in messages[-15:]) or "general chat"
-    result = await _call_claude(
+    history_text = "\n".join(f"{m.author.display_name}: {m.content[:80]}" for m in messages[-15:]) or "general"
+    trends = await _get_trends()
+    mood = _get_mood_prompt(ch_cfg)
+
+    result = await _call_ai(
         system=(
-            "Generate a fun light-hearted challenge for a Discord community. "
-            "Something people can do or discuss today. General and engaging. Output ONLY:\n"
-            "CHALLENGE: <challenge, max 100 chars>\nREWARD: <fun fake reward, max 60 chars>"
+            f"{mood}\n\n"
+            "Drop a challenge or dare in a Discord server. Make it specific, fun, and something "
+            "people would actually want to do or argue about. "
+            "Output ONLY:\nCHALLENGE: <challenge, punchy, under 100 chars>\nREWARD: <ridiculous fake reward, under 50 chars>"
         ),
-        user=f"Recent chat:\n{history_text}"
+        user=(
+            f"Chat:\n{history_text}\n"
+            + (f"Trending: {trends}" if trends else "")
+        )
     )
     lines = [l.strip() for l in result.splitlines() if l.strip()]
     challenge = next((l.replace("CHALLENGE:", "").strip() for l in lines if l.startswith("CHALLENGE:")), result.strip())
-    reward    = next((l.replace("REWARD:", "").strip() for l in lines if l.startswith("REWARD:")), "Eternal glory 🏆")
-    embed = discord.Embed(title="⚡ Daily Challenge", description=f"**{challenge}**", color=0xF1C40F)
-    embed.add_field(name="Reward", value=reward, inline=False)
-    embed.set_footer(text=f"{apex_intro()} Can you do it? • Knockdown Shield")
+    reward    = next((l.replace("REWARD:", "").strip() for l in lines if l.startswith("REWARD:")), "bragging rights forever")
+    embed = discord.Embed(
+        description=f"**{challenge}**\n\n*Prize: {reward}*",
+        color=0xF1C40F
+    )
+    embed.set_footer(text="⚡ first one wins")
     await channel.send(embed=embed)
     _log_revival(channel.id, "challenge", challenge)
 
@@ -424,13 +518,14 @@ async def revive(ctx):
         color=0xDA292A,
     )
     for name, val in [
-        ("`!revive now`",               "AI message based on channel history"),
-        ("`!revive poll`",              "Drop a conversation poll"),
+        ("`!revive now`",               "AI message based on channel history + trends"),
+        ("`!revive poll`",              "Drop a divisive poll"),
         ("`!revive debate`",            "Spark a hot take debate"),
         ("`!revive versus`",            "Pit two things against each other"),
-        ("`!revive memory`",            "Resurface a past message"),
-        ("`!revive question`",          "Ask a random active member something"),
-        ("`!revive challenge`",         "Post a fun daily challenge"),
+        ("`!revive memory`",            "Resurface & react to a past message"),
+        ("`!revive question`",          "Call someone out on what they said"),
+        ("`!revive challenge`",         "Drop a challenge or dare"),
+        ("`!revive mood <mood>`",       "Set mood: `witty` / `chaotic` / `sharp`"),
         ("`!revive set <hours>`",       "Watch this channel, auto-revive after N hours"),
         ("`!revive auto`",              "Toggle smart technique selection on/off"),
         ("`!revive quiet <s> <e>`",     "Set quiet hours (e.g. `!revive quiet 23 8`)"),
@@ -551,6 +646,29 @@ async def revive_timezone(ctx, tz: str = "UTC"):
     cfg = get_guild_cfg(ctx.guild.id)
     cfg["timezone"] = tz
     await ctx.send(f"🕐 Server timezone set to **{tz}**.")
+
+
+@revive.command(name="mood")
+@commands.has_permissions(manage_channels=True)
+async def revive_mood(ctx, mood: str = ""):
+    mood = mood.lower()
+    if mood not in MOODS:
+        await ctx.send(
+            f"❌ Unknown mood. Choose one of: `witty`, `chaotic`, `sharp`\n\n"
+            f"**witty** — sarcastic, finds the joke, roasts bad takes\n"
+            f"**chaotic** — unfiltered, stirs the pot, bold claims\n"
+            f"**sharp** — observational, calls out contradictions, asks hard questions"
+        )
+        return
+    cfg = get_guild_cfg(ctx.guild.id)
+    cfg["channels"].setdefault(ctx.channel.id, {})
+    cfg["channels"][ctx.channel.id]["mood"] = mood
+    descriptions = {
+        "witty": "Sarcastic and sharp — finds the joke in everything 😏",
+        "chaotic": "Unfiltered and bold — says what no one else will 🔥",
+        "sharp": "Observational and incisive — notices what others miss 🎯",
+    }
+    await ctx.send(f"🎭 Mood for **#{ctx.channel.name}** set to **{mood}**\n{descriptions[mood]}")
 
 
 @revive.command(name="personality")
