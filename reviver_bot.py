@@ -212,11 +212,13 @@ def _resolve_mentions(text: str, channel: discord.TextChannel) -> str:
         for name in [member.display_name, member.name]:
             if not name or len(name) < 3:
                 continue
-            # Match the name as a whole word, case-insensitive
             pattern = re.compile(rf'\b{re.escape(name)}\b', re.IGNORECASE)
             if pattern.search(text):
                 text = pattern.sub(member.mention, text, count=1)
     return text
+
+
+async def _get_history(channel: discord.TextChannel, limit: int = 60) -> list:
     messages = []
     async for msg in channel.history(limit=limit):
         if not msg.author.bot:
