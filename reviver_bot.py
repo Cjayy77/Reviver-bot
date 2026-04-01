@@ -319,10 +319,11 @@ async def _revive_now(channel: discord.TextChannel, guild_id: int, ch_cfg: dict)
             f"Write ONE message that restarts things. Be specific to what they actually talked about.\n\n"
             f"You can: reference something funny or dumb someone said, connect their chat to a current trend, "
             f"roast a take, ask something that'll divide people, or drop a random observation that fits.\n\n"
-            f"If you want to address someone directly, use @TheirName format. "
-            f"Members you can address: {names_available}\n\n"
+            f"IMPORTANT: If you address or call out a specific person, you MUST write their name as @TheirName. "
+            f"These are the only people you can address: {names_available}\n"
+            f"Do not invent names. If you mention no one specifically, that is also fine.\n\n"
             f"Rules: under 180 chars, no greetings, never mention silence, sound like a real person texting. "
-            f"0-1 emoji. Output ONLY the message."
+            f"0-1 emoji. Output ONLY the message, nothing else."
         ),
         user=(
             f"Chat history:\n{history_text}\n\n"
@@ -332,9 +333,11 @@ async def _revive_now(channel: discord.TextChannel, guild_id: int, ch_cfg: dict)
     )
 
     revival_msg = result.splitlines()[0].strip()
-    # Convert @Name references to proper Discord mentions
+    # Convert @Name to proper Discord mentions
     for name, member in member_map.items():
         revival_msg = re.sub(rf'@{re.escape(name)}\b', member.mention, revival_msg, flags=re.IGNORECASE)
+    # Clean up any leftover @Word that didn't match (avoid broken tags)
+    revival_msg = re.sub(r'@([A-Za-z0-9_]+)', lambda m: m.group(0) if '<@' in m.group(0) else m.group(1), revival_msg)
     await channel.send(revival_msg)
     _log_revival(channel.id, "now", revival_msg)
 
@@ -393,7 +396,8 @@ async def _revive_debate(channel: discord.TextChannel, guild_id: int, ch_cfg: di
             f"{mood}\n\n"
             "Drop a hot take in a Discord server. Make it bold — something people will push back on. "
             "Tie it to what they talked about or something trending. "
-            f"If it makes sense to call someone out, use @TheirName. Members: {names_available}\n"
+            f"IMPORTANT: If you call someone out, write their name as @TheirName. "
+            f"Only these people: {names_available}. Don't invent names.\n"
             "Sound like a real person, not a prompt. Under 140 chars. Output ONLY the take."
         ),
         user=(
@@ -404,6 +408,7 @@ async def _revive_debate(channel: discord.TextChannel, guild_id: int, ch_cfg: di
     msg = result.strip()
     for name, member in member_map.items():
         msg = re.sub(rf'@{re.escape(name)}\b', member.mention, msg, flags=re.IGNORECASE)
+    msg = re.sub(r'@([A-Za-z0-9_]+)', lambda m: m.group(1), msg)
     await channel.send(f"🔥 {msg}")
     _log_revival(channel.id, "debate", msg)
 
@@ -629,6 +634,8 @@ async def revive_set(ctx, hours: float = 6.0):
     cfg = get_guild_cfg(ctx.guild.id)
     cfg["channels"].setdefault(ctx.channel.id, {})
     cfg["channels"][ctx.channel.id].update({"threshold_hours": hours, "watched": True, "auto": True})
+    # Seed last_message to now so it doesn't immediately trigger
+    last_message[ctx.channel.id] = datetime.now(timezone.utc)
     embed = discord.Embed(
         title="🛡️ Channel Watched",
         description=f"Knockdown Shield will deploy in **#{ctx.channel.name}** after **{hours}h** of silence.",
