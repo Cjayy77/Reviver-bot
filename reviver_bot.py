@@ -301,58 +301,65 @@ async def _revive_now(channel: discord.TextChannel, guild_id: int, ch_cfg: dict)
 
     top_topics = sorted(topic_users, key=lambda w: len(topic_users[w]), reverse=True)[:6]
 
-    # Build member name→mention map for AI to use
-    member_map: dict[str, discord.Member] = {}
-    for msg in messages[-20:]:
-        m = channel.guild.get_member(msg.author.id)
-        if m:
-            member_map[m.display_name] = m
+    # Find the most relevant person to tag — most recent substantive message
+    target_member = None
+    for msg in reversed(messages[-15:]):
+        if len(msg.content) > 20 and not msg.content.startswith("!"):
+            m = channel.guild.get_member(msg.author.id)
+            if m and not m.bot:
+                target_member = m
+                break
 
-    # Build history — strip raw Discord mention IDs so AI doesn't copy them
-    def clean_content(content: str) -> str:
-        # Replace <@123456> with the member's display name if possible
-        def replace_mention(m):
-            uid = int(m.group(1))
-            member = channel.guild.get_member(uid)
-            return f"@{member.display_name}" if member else "@someone"
-        return re.sub(r'<@!?(\d+)>', replace_mention, content)
+    # Clean history for AI — replace all Discord mentions with plain "Name said:"
+    def clean(content: str) -> str:
+        def swap(match):
+            uid = int(match.group(1))
+            mem = channel.guild.get_member(uid)
+            return mem.display_name if mem else "someone"
+        return re.sub(r'<@!?(\d+)>', swap, content)
 
-    history_text = "\n".join(f"{m.author.display_name}: {clean_content(m.content[:120])}" for m in messages[-35:])
+    history_text = "\n".join(
+        f"{m.author.display_name}: {clean(m.content[:120])}"
+        for m in messages[-35:]
+    )
     trends = await _get_trends()
     mood = _get_mood_prompt(ch_cfg)
-    names_available = ", ".join(member_map.keys()) if member_map else "no specific members"
+
+    # Tell AI to write PING as a placeholder — we replace it ourselves
+    ping_instruction = (
+        f"Use the placeholder PING when addressing the person directly. "
+        f"The person you're talking to is: {target_member.display_name}\n"
+    ) if target_member else ""
 
     result = await _call_ai(
         system=(
             f"{mood}\n\n"
             f"You're a member of a Discord server jumping back into a dead conversation. "
-            f"Write ONE message that restarts things. Be specific to what they actually talked about.\n\n"
-            f"You can: reference something funny or dumb someone said, connect their chat to a current trend, "
-            f"roast a take, ask something that'll divide people, or drop a random observation that fits.\n\n"
-            f"IMPORTANT: If you address or call out a specific person, you MUST write their name as @TheirName. "
-            f"These are the only people you can address: {names_available}\n"
-            f"Do not invent names. If you mention no one specifically, that is also fine.\n\n"
-            f"Rules: under 180 chars, no greetings, never mention silence, sound like a real person texting. "
-            f"0-1 emoji. Output ONLY the message, nothing else."
+            f"Write ONE message that restarts things. Be specific to what they talked about.\n\n"
+            f"You can: reference something funny, connect to a trend, roast a take, "
+            f"ask something divisive, or drop an observation.\n\n"
+            f"{ping_instruction}"
+            f"Rules: under 180 chars, no greetings, never mention silence, "
+            f"sound like a real person texting. 0-1 emoji. Output ONLY the message."
         ),
         user=(
             f"Chat history:\n{history_text}\n\n"
             f"Hot topics: {', '.join(top_topics) or 'general'}\n"
-            + (f"Trending online: {trends}\n" if trends else "")
+            + (f"Trending: {trends}\n" if trends else "")
         )
     )
 
     revival_msg = result.splitlines()[0].strip()
-    # Convert any form of name reference to a proper mention
-    # Catches: @cyan, cyan, @Cyan — all become <@id>
-    for name, member in member_map.items():
-        # @Name form
-        revival_msg = re.sub(rf'@{re.escape(name)}\b', member.mention, revival_msg, flags=re.IGNORECASE)
-        # Bare name at start of a phrase like "cyan think you've..."
-        revival_msg = re.sub(rf'\b{re.escape(name)}\b(?=\s+(think|said|you|your|is|was|has|did|do|are|were))', member.mention, revival_msg, flags=re.IGNORECASE)
-    # Fix raw IDs: <123456> → <@123456>
-    revival_msg = re.sub(r'<(\d{15,20})>', r'<@\1>', revival_msg)
+
+    # Replace PING placeholder with actual Discord mention
+    if target_member and "PING" in revival_msg:
+        revival_msg = revival_msg.replace("PING", target_member.mention)
+    elif target_member and random.random() < 0.5:
+        # Prepend mention if AI didn't use PING but we have a target
+        revival_msg = f"{target_member.mention} {revival_msg}"
+
     await channel.send(revival_msg)
+    _log_revival(channel.id, "now", revival_msg)
     _log_revival(channel.id, "now", revival_msg)
 
 
@@ -483,15 +490,17 @@ async def _revive_memory(channel: discord.TextChannel, guild_id: int, ch_cfg: di
         ),
         user=f"{picked.author.display_name} said: {picked.content[:200]}"
     )
-    reaction = _resolve_mentions(result.strip(), channel)
+    reaction = result.strip()
     preview = picked.content[:60] + ('...' if len(picked.content) > 60 else '')
-    await channel.send(f"wait {picked.author.mention} said \"{preview}\" — {reaction}")
+    # Use the actual member mention directly — no name guessing
+    author = channel.guild.get_member(picked.author.id)
+    mention = author.mention if author else picked.author.display_name
+    await channel.send(f"wait {mention} said \"{preview}\" — {reaction}")
     _log_revival(channel.id, "memory", result.strip())
 
 
 async def _revive_question(channel: discord.TextChannel, guild_id: int, ch_cfg: dict):
     messages = await _get_history(channel, 40)
-    # Only tag someone who said something specific and substantial
     substantial = [m for m in messages[-15:] if len(m.content) > 20 and not m.content.startswith("!")]
     if not substantial:
         await _revive_now(channel, guild_id, ch_cfg)
@@ -508,14 +517,13 @@ async def _revive_question(channel: discord.TextChannel, guild_id: int, ch_cfg: 
         system=(
             f"{mood}\n\n"
             "Someone said something in a Discord server. "
-            "Ask them a follow-up — could be genuine curiosity, playfully challenging them, "
-            "or calling out something questionable they said. Under 90 chars. "
-            "Do NOT include their name. Output ONLY the question or comment."
+            "Ask them a follow-up — genuine curiosity, playfully challenging, or calling them out. "
+            "Under 90 chars. Do NOT include any name. Output ONLY the question or comment."
         ),
         user=f"They said: \"{picked_msg.content[:200]}\""
     )
-    question = _resolve_mentions(result.strip(), channel)
-    await channel.send(f"{target.mention} {question}")
+    # We handle the mention ourselves directly — no name guessing
+    await channel.send(f"{target.mention} {result.strip()}")
     _log_revival(channel.id, "question", result.strip())
 
 
