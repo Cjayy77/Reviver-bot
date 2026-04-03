@@ -160,6 +160,7 @@ async def check_dead_channels():
                 continue
             pending_revival.add(ch_id)
             technique = _pick_auto_technique(ch_id)
+            print(f"[auto] reviving #{channel.name} in {guild.name} with technique: {technique} (silence: {silence:.1f}h)")
             bot.loop.create_task(_run_technique(channel, guild.id, ch_cfg, technique))
 
 
@@ -342,13 +343,15 @@ async def _revive_now(channel: discord.TextChannel, guild_id: int, ch_cfg: dict)
     )
 
     revival_msg = result.splitlines()[0].strip()
-    # Convert @Name to proper Discord mentions
+    # Convert any form of name reference to a proper mention
+    # Catches: @cyan, cyan, @Cyan — all become <@id>
     for name, member in member_map.items():
+        # @Name form
         revival_msg = re.sub(rf'@{re.escape(name)}\b', member.mention, revival_msg, flags=re.IGNORECASE)
-    # Fix raw IDs the AI sometimes generates: <123456> → <@123456>
+        # Bare name at start of a phrase like "cyan think you've..."
+        revival_msg = re.sub(rf'\b{re.escape(name)}\b(?=\s+(think|said|you|your|is|was|has|did|do|are|were))', member.mention, revival_msg, flags=re.IGNORECASE)
+    # Fix raw IDs: <123456> → <@123456>
     revival_msg = re.sub(r'<(\d{15,20})>', r'<@\1>', revival_msg)
-    # Clean up any leftover @Word that didn't match
-    revival_msg = re.sub(r'@([A-Za-z0-9_]+)', lambda m: m.group(1) if '<@' not in revival_msg else m.group(0), revival_msg)
     await channel.send(revival_msg)
     _log_revival(channel.id, "now", revival_msg)
 
@@ -419,8 +422,8 @@ async def _revive_debate(channel: discord.TextChannel, guild_id: int, ch_cfg: di
     msg = result.strip()
     for name, member in member_map.items():
         msg = re.sub(rf'@{re.escape(name)}\b', member.mention, msg, flags=re.IGNORECASE)
+        msg = re.sub(rf'\b{re.escape(name)}\b(?=\s+(think|said|you|your|is|was|has|did|do|are|were))', member.mention, msg, flags=re.IGNORECASE)
     msg = re.sub(r'<(\d{15,20})>', r'<@\1>', msg)
-    msg = re.sub(r'@([A-Za-z0-9_]+)', lambda m: m.group(1), msg)
     await channel.send(f"🔥 {msg}")
     _log_revival(channel.id, "debate", msg)
 
