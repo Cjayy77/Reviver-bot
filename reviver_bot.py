@@ -307,7 +307,16 @@ async def _revive_now(channel: discord.TextChannel, guild_id: int, ch_cfg: dict)
         if m:
             member_map[m.display_name] = m
 
-    history_text = "\n".join(f"{m.author.display_name}: {m.content[:120]}" for m in messages[-35:])
+    # Build history — strip raw Discord mention IDs so AI doesn't copy them
+    def clean_content(content: str) -> str:
+        # Replace <@123456> with the member's display name if possible
+        def replace_mention(m):
+            uid = int(m.group(1))
+            member = channel.guild.get_member(uid)
+            return f"@{member.display_name}" if member else "@someone"
+        return re.sub(r'<@!?(\d+)>', replace_mention, content)
+
+    history_text = "\n".join(f"{m.author.display_name}: {clean_content(m.content[:120])}" for m in messages[-35:])
     trends = await _get_trends()
     mood = _get_mood_prompt(ch_cfg)
     names_available = ", ".join(member_map.keys()) if member_map else "no specific members"
@@ -336,8 +345,10 @@ async def _revive_now(channel: discord.TextChannel, guild_id: int, ch_cfg: dict)
     # Convert @Name to proper Discord mentions
     for name, member in member_map.items():
         revival_msg = re.sub(rf'@{re.escape(name)}\b', member.mention, revival_msg, flags=re.IGNORECASE)
-    # Clean up any leftover @Word that didn't match (avoid broken tags)
-    revival_msg = re.sub(r'@([A-Za-z0-9_]+)', lambda m: m.group(0) if '<@' in m.group(0) else m.group(1), revival_msg)
+    # Fix raw IDs the AI sometimes generates: <123456> → <@123456>
+    revival_msg = re.sub(r'<(\d{15,20})>', r'<@\1>', revival_msg)
+    # Clean up any leftover @Word that didn't match
+    revival_msg = re.sub(r'@([A-Za-z0-9_]+)', lambda m: m.group(1) if '<@' not in revival_msg else m.group(0), revival_msg)
     await channel.send(revival_msg)
     _log_revival(channel.id, "now", revival_msg)
 
@@ -408,6 +419,7 @@ async def _revive_debate(channel: discord.TextChannel, guild_id: int, ch_cfg: di
     msg = result.strip()
     for name, member in member_map.items():
         msg = re.sub(rf'@{re.escape(name)}\b', member.mention, msg, flags=re.IGNORECASE)
+    msg = re.sub(r'<(\d{15,20})>', r'<@\1>', msg)
     msg = re.sub(r'@([A-Za-z0-9_]+)', lambda m: m.group(1), msg)
     await channel.send(f"🔥 {msg}")
     _log_revival(channel.id, "debate", msg)
